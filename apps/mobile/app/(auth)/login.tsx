@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
-import { authApi, setSession } from '@/services/api';
+import { supabase } from '@/lib/supabase';
 import { colors, spacing, radius, typography, shadow } from '@/constants/theme';
 
 export default function Login() {
@@ -13,31 +13,46 @@ export default function Login() {
   async function handleLogin() {
     const id = loginId.trim();
     if (!id || !password) {
-      Alert.alert('Error', 'Enter your email or phone and password');
+      Alert.alert('Error', 'Enter your email and password');
       return;
     }
     setLoading(true);
     try {
-      const { token, user } = await authApi.login(id, password);
-      await setSession(token, user);
-      switch (user.role) {
-        case 'super_admin':
-          router.replace('/(super-admin)/dashboard');
-          break;
-        case 'admin':
-          router.replace('/(admin)/dashboard');
-          break;
-        case 'worker':
-          router.replace('/(worker)/queue');
-          break;
-        case 'customer':
-          router.replace('/(customer)/tracker');
-          break;
-        default:
-          router.replace('/(auth)/login');
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: id,
+        password: password,
+      });
+
+      if (authError) throw authError;
+
+      if (authData.user) {
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', authData.user.id)
+          .single();
+
+        if (profileError) throw profileError;
+
+        switch (profile.role) {
+          case 'super_admin':
+            router.replace('/(super-admin)/dashboard');
+            break;
+          case 'admin':
+            router.replace('/(admin)/dashboard');
+            break;
+          case 'worker':
+            router.replace('/(worker)/queue');
+            break;
+          case 'customer':
+            router.replace('/(customer)/tracker');
+            break;
+          default:
+            router.replace('/(auth)/login');
+        }
       }
     } catch (e) {
-      Alert.alert('Login failed', e instanceof Error ? e.message : 'Invalid email/phone or password');
+      Alert.alert('Login failed', e instanceof Error ? e.message : 'Invalid credentials');
     } finally {
       setLoading(false);
     }

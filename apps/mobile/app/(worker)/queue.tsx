@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { View, Text, FlatList, StyleSheet, Pressable, RefreshControl } from 'react-native';
 import { useRouter } from 'expo-router';
-import { api } from '@/services/api';
-import { getStoredUser } from '@/services/api';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/auth';
 import { colors, spacing, radius, shadow, typography } from '@/constants/theme';
 
 interface Visit {
@@ -41,19 +41,43 @@ function formatTimeAgo(iso: string): string {
 
 export default function WorkerQueueScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   const [data, setData] = useState<WorkerDashboard | null>(null);
-  const [userName, setUserName] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   async function load() {
     try {
-      const [u, d] = await Promise.all([
-        getStoredUser(),
-        api<WorkerDashboard>('/dashboard/worker'),
-      ]);
-      setUserName(u?.name ?? '');
-      setData(d);
+      if (!user?.id || !user?.shopId) return;
+
+      // We'll show all active cars for the shop so workers can pick them up, or just assigned to them.
+      // Usually a queue shows all 'waiting' for the shop + their own assigned ones.
+      // For MVP: let's show all for the shop today so any worker can see the live queue.
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const { data: visitsData, error } = await supabase
+        .from('visits')
+        .select(`
+          id, car_plate, car_model, service, status, created_at,
+          customer:customer_id(name)
+        `)
+        .eq('shop_id', user.shopId)
+        .gte('created_at', today.toISOString())
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      const visits = visitsData || [];
+      setData({
+        assignedToday: visits.length,
+        inProgress: visits.filter(v => v.status === 'washing' || v.status === 'drying').length,
+        completed: visits.filter(v => v.status === 'ready' || v.status === 'delivered').length,
+        visits: visits.map(v => ({
+          ...v,
+          customer_name: (v.customer as any)?.name
+        })),
+      });
     } catch {
       setData({ assignedToday: 0, completed: 0, inProgress: 0, visits: [] });
     } finally {
@@ -64,7 +88,22 @@ export default function WorkerQueueScreen() {
 
   useEffect(() => {
     load();
-  }, []);
+    if (!user?.shopId) return;
+
+    // Real-time subscription for table updates
+    const channel = supabase
+      .channel('public:visits')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'visits', filter: `shop_id=eq.${user.shopId}` },
+        () => load()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user?.shopId]);
 
   if (loading && !data) {
     return (
@@ -77,6 +116,7 @@ export default function WorkerQueueScreen() {
   const visits = data?.visits ?? [];
   const greeting = 'Good morning';
   const today = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  const userName = user?.name ?? '';
 
   return (
     <View style={styles.container}>

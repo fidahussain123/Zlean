@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
-import { authApi, setSession } from '@/services/api';
+import { supabase } from '@/lib/supabase';
 import { colors, spacing, radius, typography, shadow } from '@/constants/theme';
 
 export default function Signup() {
@@ -24,15 +24,21 @@ export default function Signup() {
     }
     setLoading(true);
     try {
-      const { token, user } = await authApi.signupCustomer(trimmedEmail, password, trimmedName);
-      await setSession(token, user);
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: trimmedEmail,
+        password: password,
+        options: {
+          data: {
+            name: trimmedName,
+            role: 'customer',
+          }
+        }
+      });
+      if (authError) throw authError;
+
       router.replace('/(customer)/tracker');
     } catch (e) {
-      let message = e instanceof Error ? e.message : 'Something went wrong';
-      if (message === 'fetch failed' || message.includes('Network')) {
-        message = 'Cannot reach server. Check your connection and that the backend is running.';
-      }
-      Alert.alert('Sign up failed', message);
+      Alert.alert('Sign up failed', e instanceof Error ? e.message : 'Something went wrong');
     } finally {
       setLoading(false);
     }
