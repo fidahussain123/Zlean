@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "zZLean CarWash",
+    "slug": "zlean-carwash",
+    "version": "1.0.0",
+    "scheme": "zlean",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#FFFFFF"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.zlean.carwash"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFFFF"
+      },
+      "package": "com.zlean.carwash"
+    },
+    "plugins": ["expo-router", "expo-secure-store"]
+  }
+}
