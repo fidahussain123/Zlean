@@ -1,7 +1,8 @@
-import { useState } from 'react';
-import { View, Text, TextInput, Pressable, StyleSheet, Alert } from 'react-native';
+import { useState, useEffect } from 'react';
+import { View, Text, TextInput, Pressable, StyleSheet, Alert, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
+import { configureGoogleSignIn, signInWithGoogle, isGoogleSignInAvailable } from '@/lib/google-auth';
 import { colors, spacing, radius, typography, shadow } from '@/constants/theme';
 
 export default function Login() {
@@ -9,6 +10,12 @@ export default function Login() {
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const showGoogleAuth = isGoogleSignInAvailable();
+
+  useEffect(() => {
+    configureGoogleSignIn();
+  }, []);
 
   async function handleLogin() {
     const id = loginId.trim();
@@ -58,6 +65,52 @@ export default function Login() {
     }
   }
 
+  async function handleGoogleSignIn() {
+    setGoogleLoading(true);
+    try {
+      const result = await signInWithGoogle();
+      if (!result.success) {
+        if (result.error !== 'Sign in cancelled') {
+          Alert.alert('Google Sign-In failed', result.error || 'Unknown error');
+        }
+        return;
+      }
+
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+
+        if (profile) {
+          switch (profile.role) {
+            case 'super_admin':
+              router.replace('/(super-admin)/dashboard');
+              break;
+            case 'admin':
+              router.replace('/(admin)/dashboard');
+              break;
+            case 'worker':
+              router.replace('/(worker)/queue');
+              break;
+            case 'customer':
+            default:
+              router.replace('/(customer)/tracker');
+              break;
+          }
+        } else {
+          router.replace('/(customer)/tracker');
+        }
+      }
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Something went wrong');
+    } finally {
+      setGoogleLoading(false);
+    }
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>zZLean</Text>
@@ -86,14 +139,35 @@ export default function Login() {
         <Pressable
           style={({ pressed }) => [styles.primaryBtn, pressed && styles.btnPressed]}
           onPress={handleLogin}
-          disabled={loading}
+          disabled={loading || googleLoading}
         >
           <Text style={styles.primaryBtnText}>{loading ? 'Signing in…' : 'Sign in'}</Text>
         </Pressable>
-        <Pressable style={styles.linkBtn} onPress={() => router.push('/(auth)/signup')} disabled={loading}>
+
+        {showGoogleAuth && (
+          <>
+            <View style={styles.divider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or</Text>
+              <View style={styles.dividerLine} />
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [styles.googleBtn, pressed && styles.btnPressed]}
+              onPress={handleGoogleSignIn}
+              disabled={loading || googleLoading}
+            >
+              <Text style={styles.googleBtnText}>
+                {googleLoading ? 'Signing in…' : 'Continue with Google'}
+              </Text>
+            </Pressable>
+          </>
+        )}
+
+        <Pressable style={styles.linkBtn} onPress={() => router.push('/(auth)/signup')} disabled={loading || googleLoading}>
           <Text style={styles.linkText}>Don't have an account? Sign up</Text>
         </Pressable>
-        <Pressable style={styles.linkBtn} onPress={() => router.push('/(auth)/shop-signup')} disabled={loading}>
+        <Pressable style={styles.linkBtn} onPress={() => router.push('/(auth)/shop-signup')} disabled={loading || googleLoading}>
           <Text style={styles.shopLinkText}>Shop Owner? Register your shop</Text>
         </Pressable>
       </View>
@@ -152,6 +226,34 @@ const styles = StyleSheet.create({
   },
   btnPressed: { opacity: 0.9, transform: [{ scale: 0.98 }] },
   primaryBtnText: { color: colors.primary, fontSize: 16, fontWeight: '600' },
+  divider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: colors.border,
+  },
+  dividerText: {
+    color: colors.textSubtle,
+    paddingHorizontal: spacing.sm,
+    fontSize: 14,
+  },
+  googleBtn: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.button,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  googleBtnText: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '500',
+  },
   linkBtn: { marginTop: spacing.md, alignSelf: 'center' },
   linkText: { color: colors.textSubtle, fontSize: 14 },
   shopLinkText: { color: colors.primary, fontSize: 14, fontWeight: '600' },

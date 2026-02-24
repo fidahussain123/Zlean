@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
+import { configureGoogleSignIn, signInWithGoogle, isGoogleSignInAvailable } from '@/lib/google-auth';
 import { colors, spacing, radius, typography, shadow } from '@/constants/theme';
 
 export default function Signup() {
@@ -10,6 +11,12 @@ export default function Signup() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const showGoogleAuth = isGoogleSignInAvailable();
+
+  useEffect(() => {
+    configureGoogleSignIn();
+  }, []);
 
   async function handleSignup() {
     const trimmedName = name.trim();
@@ -41,6 +48,25 @@ export default function Signup() {
       Alert.alert('Sign up failed', e instanceof Error ? e.message : 'Something went wrong');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleGoogleSignUp() {
+    setGoogleLoading(true);
+    try {
+      const result = await signInWithGoogle();
+      if (!result.success) {
+        if (result.error !== 'Sign in cancelled') {
+          Alert.alert('Google Sign-Up failed', result.error || 'Unknown error');
+        }
+        return;
+      }
+
+      router.replace('/(customer)/tracker');
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Something went wrong');
+    } finally {
+      setGoogleLoading(false);
     }
   }
 
@@ -79,11 +105,32 @@ export default function Signup() {
         <Pressable
           style={({ pressed }) => [styles.primaryBtn, pressed && styles.btnPressed]}
           onPress={handleSignup}
-          disabled={loading}
+          disabled={loading || googleLoading}
         >
           <Text style={styles.primaryBtnText}>{loading ? 'Creating…' : 'Sign up'}</Text>
         </Pressable>
-        <Pressable style={styles.linkBtn} onPress={() => router.back()} disabled={loading}>
+
+        {showGoogleAuth && (
+          <>
+            <View style={styles.divider}>
+              <View style={styles.dividerLine} />
+              <Text style={styles.dividerText}>or</Text>
+              <View style={styles.dividerLine} />
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [styles.googleBtn, pressed && styles.btnPressed]}
+              onPress={handleGoogleSignUp}
+              disabled={loading || googleLoading}
+            >
+              <Text style={styles.googleBtnText}>
+                {googleLoading ? 'Signing up…' : 'Continue with Google'}
+              </Text>
+            </Pressable>
+          </>
+        )}
+
+        <Pressable style={styles.linkBtn} onPress={() => router.back()} disabled={loading || googleLoading}>
           <Text style={styles.linkText}>Already have an account? Sign in</Text>
         </Pressable>
       </View>
@@ -127,6 +174,34 @@ const styles = StyleSheet.create({
   },
   btnPressed: { opacity: 0.9, transform: [{ scale: 0.98 }] },
   primaryBtnText: { color: colors.primary, fontSize: 16, fontWeight: '600' },
+  divider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: colors.border,
+  },
+  dividerText: {
+    color: colors.textSubtle,
+    paddingHorizontal: spacing.sm,
+    fontSize: 14,
+  },
+  googleBtn: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.button,
+    padding: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  googleBtnText: {
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: '500',
+  },
   linkBtn: { marginTop: spacing.md, alignSelf: 'center' },
   linkText: { color: colors.textSubtle, fontSize: 14 },
 });
