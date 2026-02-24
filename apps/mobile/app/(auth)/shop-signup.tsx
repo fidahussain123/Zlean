@@ -11,37 +11,13 @@ import {
   Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { setSession } from '@/services/api';
-import { useAuth } from '@/contexts/auth';
+import { supabase } from '@/lib/supabase';
 import { colors, spacing, radius, shadow } from '@/constants/theme';
-import { API_URL } from '@/constants/api';
 
 type Step = 'email' | 'onboarding';
 
-interface InviteCheckResponse {
-  hasInvite: boolean;
-  token: string;
-  email: string;
-}
-
-interface AcceptResponse {
-  token: string;
-  user: {
-    id: string;
-    name: string;
-    email: string;
-    role: 'admin';
-    shopId: string;
-  };
-  shop: {
-    id: string;
-    name: string;
-  };
-}
-
 export default function ShopOwnerSignup() {
   const router = useRouter();
-  const { setUser } = useAuth();
 
   const [step, setStep] = useState<Step>('email');
   const [loading, setLoading] = useState(false);
@@ -70,22 +46,20 @@ export default function ShopOwnerSignup() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/invites/check-email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: trimmed }),
-      });
+      const { data, error } = await supabase
+        .from('invites')
+        .select('*')
+        .eq('email', trimmed)
+        .eq('status', 'pending')
+        .single();
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.error || 'No invitation found');
+      if (error || !data) {
+        setError('No pending invitation found for this email');
         setLoading(false);
         return;
       }
 
-      const result = data as InviteCheckResponse;
-      setInviteToken(result.token);
+      setInviteToken(data.token);
       setStep('onboarding');
     } catch {
       setError('Something went wrong. Please try again.');
@@ -117,32 +91,53 @@ export default function ShopOwnerSignup() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_URL}/invites/${inviteToken}/accept`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          password,
-          shopName: shopName.trim(),
-          shopAddress: shopAddress.trim() || undefined,
-          shopPhone: shopPhone.trim() || undefined,
-        }),
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: {
+            name: name.trim(),
+            role: 'admin',
+          }
+        }
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        setError(data.error || 'Failed to create account');
-        setLoading(false);
-        return;
+      if (authError || !authData.user) {
+        throw new Error(authError?.message || 'Failed to create account');
       }
 
-      const result = data as AcceptResponse;
-      await setSession(result.token, result.user);
-      setUser(result.user);
+      const { data: shopData, error: shopError } = await supabase
+        .from('shops')
+        .insert({
+          name: shopName.trim(),
+          address: shopAddress.trim() || null,
+          phone: shopPhone.trim() || null,
+          owner_id: authData.user.id
+        })
+        .select('id')
+        .single();
+
+      if (shopError) {
+        console.error('Failed to create shop', shopError);
+      }
+
+      if (shopData) {
+        await supabase
+          .from('profiles')
+          .update({ shop_id: shopData.id })
+          .eq('id', authData.user.id);
+      }
+
+      supabase
+        .from('invites')
+        .update({ status: 'accepted', accepted_at: new Date().toISOString() })
+        .eq('token', inviteToken)
+        .then();
+
       router.replace('/(admin)/dashboard');
-    } catch {
-      setError('Something went wrong. Please try again.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Something went wrong. Please try again.');
+    } finally {
       setLoading(false);
     }
   };

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView, RefreshControl } from 'react-native';
 import { useRouter } from 'expo-router';
-import { api } from '@/services/api';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/auth';
 import { colors, spacing, radius, typography, shadow } from '@/constants/theme';
 
 interface VisitRow {
@@ -43,14 +44,52 @@ function formatTimeAgo(iso: string): string {
 
 export default function AdminDashboard() {
   const router = useRouter();
+  const { user } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   async function load() {
     try {
-      const data = await api<DashboardStats>('/dashboard/admin');
-      setStats(data);
+      if (!user?.shopId) return;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const { data, error } = await supabase
+        .from('visits')
+        .select(`
+          id, car_plate, car_model, service, status, created_at,
+          customer:customer_id(name),
+          worker:worker_id(name)
+        `)
+        .eq('shop_id', user.shopId)
+        .gte('created_at', today.toISOString())
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+
+      const visits = data || [];
+      const inProgress = visits.filter(v => v.status === 'washing' || v.status === 'drying').length;
+      const ready = visits.filter(v => v.status === 'ready').length;
+
+      const formattedVisits = visits.map(v => ({
+        id: v.id,
+        car_plate: v.car_plate,
+        car_model: v.car_model,
+        service: v.service,
+        status: v.status,
+        customer_name: (v.customer as any)?.name,
+        worker_name: (v.worker as any)?.name,
+        created_at: v.created_at,
+      }));
+
+      setStats({
+        totalToday: visits.length,
+        inProgress,
+        ready,
+        revenueToday: 0, // Mock for now or implement invoice sum later
+        visits: formattedVisits,
+      });
     } catch {
       setStats({ totalToday: 0, inProgress: 0, ready: 0, revenueToday: 0, visits: [] });
     } finally {
@@ -61,7 +100,7 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [user?.shopId]);
 
   const onRefresh = () => {
     setRefreshing(true);

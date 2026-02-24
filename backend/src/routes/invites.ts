@@ -1,8 +1,6 @@
 import { Router } from 'express';
-import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
-import bcrypt from 'bcryptjs';
-import { db } from '../db/turso.js';
+import { supabase, supabaseAdmin } from '../db/supabase.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { sendInviteEmail } from '../services/email.js';
 
@@ -10,10 +8,6 @@ const router = Router();
 
 function generateToken(): string {
   return crypto.randomBytes(32).toString('hex');
-}
-
-function createAuthToken(userId: string, role: string): string {
-  return Buffer.from(JSON.stringify({ userId, role, t: Date.now() }), 'utf8').toString('base64url');
 }
 
 function getExpiresAt(): string {
@@ -34,49 +28,66 @@ router.post('/', requireAuth, requireRole('super_admin'), async (req, res) => {
     return res.status(400).json({ error: 'Valid email required' });
   }
 
-  const existingUser = await db.execute({
-    sql: 'SELECT id FROM users WHERE email = ? AND role = ?',
-    args: [emailStr, 'admin'],
-  });
-  if (existingUser.rows.length > 0) {
+  const { data: existingUser } = await supabase
+    .from('profiles')
+    .select('id')
+    .eq('email', emailStr)
+    .eq('role', 'admin')
+    .single();
+
+  if (existingUser) {
     return res.status(409).json({ error: 'This email is already registered as a shop owner' });
   }
 
-  const pendingInvite = await db.execute({
-    sql: "SELECT id, expires_at FROM invites WHERE email = ? AND status = 'pending'",
-    args: [emailStr],
-  });
-  if (pendingInvite.rows.length > 0) {
-    const inv = pendingInvite.rows[0];
-    if (!isExpired(inv.expires_at as string)) {
+  const { data: pendingInvite } = await supabase
+    .from('invites')
+    .select('id, expires_at')
+    .eq('email', emailStr)
+    .eq('status', 'pending')
+    .single();
+
+  if (pendingInvite) {
+    if (!isExpired(pendingInvite.expires_at)) {
       return res.status(409).json({ error: 'An active invite already exists for this email' });
     }
-    await db.execute({
-      sql: "UPDATE invites SET status = 'expired' WHERE id = ?",
-      args: [inv.id],
-    });
+    await supabase
+      .from('invites')
+      .update({ status: 'expired' })
+      .eq('id', pendingInvite.id);
   }
 
-  const id = uuidv4();
   const token = generateToken();
   const expiresAt = getExpiresAt();
   const createdBy = req.auth!.userId;
 
-  await db.execute({
-    sql: 'INSERT INTO invites (id, email, token, status, created_by, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
-    args: [id, emailStr, token, 'pending', createdBy, expiresAt],
-  });
+  const { data: invite, error } = await supabase
+    .from('invites')
+    .insert({
+      email: emailStr,
+      token,
+      status: 'pending',
+      created_by: createdBy,
+      expires_at: expiresAt,
+    })
+    .select()
+    .single();
 
-  const inviterRow = await db.execute({
-    sql: 'SELECT name FROM users WHERE id = ?',
-    args: [createdBy],
-  });
-  const inviterName = inviterRow.rows[0]?.name as string || 'zLean Admin';
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const { data: inviter } = await supabase
+    .from('profiles')
+    .select('name')
+    .eq('id', createdBy)
+    .single();
+
+  const inviterName = inviter?.name || 'zLean Admin';
 
   const emailSent = await sendInviteEmail({ to: emailStr, token, inviterName });
 
   return res.status(201).json({
-    id,
+    id: invite.id,
     email: emailStr,
     token,
     status: 'pending',
@@ -87,20 +98,32 @@ router.post('/', requireAuth, requireRole('super_admin'), async (req, res) => {
 
 router.get('/', requireAuth, requireRole('super_admin'), async (_req, res) => {
   const now = new Date().toISOString();
-  await db.execute({
-    sql: "UPDATE invites SET status = 'expired' WHERE status = 'pending' AND expires_at < ?",
-    args: [now],
-  });
+  
+  await supabase
+    .from('invites')
+    .update({ status: 'expired' })
+    .eq('status', 'pending')
+    .lt('expires_at', now);
 
-  const result = await db.execute({
-    sql: `SELECT i.id, i.email, i.token, i.status, i.created_at, i.expires_at, i.accepted_at, u.name as created_by_name
-          FROM invites i
-          LEFT JOIN users u ON i.created_by = u.id
-          ORDER BY i.created_at DESC`,
-    args: [],
-  });
+  const { data: invites, error } = await supabase
+    .from('invites')
+    .select(`
+      id,
+      email,
+      token,
+      status,
+      created_at,
+      expires_at,
+      accepted_at,
+      profiles!invites_created_by_fkey(name)
+    `)
+    .order('created_at', { ascending: false });
 
-  const invites = result.rows.map(row => ({
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const mappedInvites = (invites || []).map(row => ({
     id: row.id,
     email: row.email,
     token: row.token,
@@ -108,10 +131,10 @@ router.get('/', requireAuth, requireRole('super_admin'), async (_req, res) => {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
     acceptedAt: row.accepted_at,
-    createdByName: row.created_by_name,
+    createdByName: (row.profiles as { name: string } | null)?.name || 'Unknown',
   }));
 
-  return res.json(invites);
+  return res.json(mappedInvites);
 });
 
 router.post('/check-email', async (req, res) => {
@@ -122,22 +145,22 @@ router.post('/check-email', async (req, res) => {
     return res.status(400).json({ error: 'Valid email required' });
   }
 
-  const result = await db.execute({
-    sql: "SELECT id, email, token, status, expires_at FROM invites WHERE email = ? AND status = 'pending'",
-    args: [emailStr],
-  });
+  const { data: invite } = await supabase
+    .from('invites')
+    .select('id, email, token, status, expires_at')
+    .eq('email', emailStr)
+    .eq('status', 'pending')
+    .single();
 
-  if (result.rows.length === 0) {
+  if (!invite) {
     return res.status(404).json({ error: 'No invitation found for this email. Contact your administrator to get an invite.' });
   }
 
-  const invite = result.rows[0];
-
-  if (isExpired(invite.expires_at as string)) {
-    await db.execute({
-      sql: "UPDATE invites SET status = 'expired' WHERE id = ?",
-      args: [invite.id],
-    });
+  if (isExpired(invite.expires_at)) {
+    await supabase
+      .from('invites')
+      .update({ status: 'expired' })
+      .eq('id', invite.id);
     return res.status(410).json({ error: 'Your invitation has expired. Please contact your administrator for a new invite.' });
   }
 
@@ -151,16 +174,15 @@ router.post('/check-email', async (req, res) => {
 router.get('/:token', async (req, res) => {
   const { token } = req.params;
 
-  const result = await db.execute({
-    sql: "SELECT id, email, status, expires_at FROM invites WHERE token = ?",
-    args: [token],
-  });
+  const { data: invite } = await supabase
+    .from('invites')
+    .select('id, email, status, expires_at')
+    .eq('token', token)
+    .single();
 
-  if (result.rows.length === 0) {
+  if (!invite) {
     return res.status(404).json({ error: 'Invalid invite link' });
   }
-
-  const invite = result.rows[0];
 
   if (invite.status === 'accepted') {
     return res.status(410).json({ error: 'This invite has already been used' });
@@ -170,11 +192,11 @@ router.get('/:token', async (req, res) => {
     return res.status(410).json({ error: 'This invite has been revoked' });
   }
 
-  if (isExpired(invite.expires_at as string)) {
-    await db.execute({
-      sql: "UPDATE invites SET status = 'expired' WHERE id = ?",
-      args: [invite.id],
-    });
+  if (isExpired(invite.expires_at)) {
+    await supabase
+      .from('invites')
+      .update({ status: 'expired' })
+      .eq('id', invite.id);
     return res.status(410).json({ error: 'This invite has expired' });
   }
 
@@ -198,62 +220,86 @@ router.post('/:token/accept', async (req, res) => {
     return res.status(400).json({ error: 'Shop name is required' });
   }
 
-  const inviteResult = await db.execute({
-    sql: "SELECT id, email, status, expires_at FROM invites WHERE token = ?",
-    args: [token],
-  });
+  const { data: invite } = await supabase
+    .from('invites')
+    .select('id, email, status, expires_at')
+    .eq('token', token)
+    .single();
 
-  if (inviteResult.rows.length === 0) {
+  if (!invite) {
     return res.status(404).json({ error: 'Invalid invite link' });
   }
-
-  const invite = inviteResult.rows[0];
 
   if (invite.status !== 'pending') {
     return res.status(410).json({ error: `This invite is ${invite.status}` });
   }
 
-  if (isExpired(invite.expires_at as string)) {
-    await db.execute({
-      sql: "UPDATE invites SET status = 'expired' WHERE id = ?",
-      args: [invite.id],
-    });
+  if (isExpired(invite.expires_at)) {
+    await supabase
+      .from('invites')
+      .update({ status: 'expired' })
+      .eq('id', invite.id);
     return res.status(410).json({ error: 'This invite has expired' });
   }
 
-  const shopId = uuidv4();
-  const userId = uuidv4();
-  const passwordHash = await bcrypt.hash(password, 12);
-  const now = new Date().toISOString();
-
-  await db.execute({
-    sql: 'INSERT INTO shops (id, name, address, phone, owner_id, status) VALUES (?, ?, ?, ?, ?, ?)',
-    args: [shopId, shopName.trim(), shopAddress?.trim() || null, shopPhone?.trim() || null, userId, 'active'],
+  const { data: authData, error: authError } = await supabaseAdmin.auth.admin.createUser({
+    email: invite.email,
+    password: password,
+    email_confirm: true,
+    user_metadata: {
+      name: name.trim(),
+      role: 'admin',
+    },
   });
 
-  await db.execute({
-    sql: 'INSERT INTO users (id, name, email, role, shop_id, password_hash, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    args: [userId, name.trim(), invite.email, 'admin', shopId, passwordHash, 'active'],
-  });
+  if (authError) {
+    return res.status(400).json({ error: authError.message });
+  }
 
-  await db.execute({
-    sql: "UPDATE invites SET status = 'accepted', accepted_at = ? WHERE id = ?",
-    args: [now, invite.id],
-  });
+  const userId = authData.user.id;
 
-  const authToken = createAuthToken(userId, 'admin');
+  const { data: shop, error: shopError } = await supabase
+    .from('shops')
+    .insert({
+      name: shopName.trim(),
+      address: shopAddress?.trim() || null,
+      phone: shopPhone?.trim() || null,
+      owner_id: userId,
+      status: 'active',
+    })
+    .select()
+    .single();
+
+  if (shopError) {
+    return res.status(500).json({ error: shopError.message });
+  }
+
+  await supabase
+    .from('profiles')
+    .update({ shop_id: shop.id })
+    .eq('id', userId);
+
+  await supabase
+    .from('invites')
+    .update({ status: 'accepted', accepted_at: new Date().toISOString() })
+    .eq('id', invite.id);
+
+  const { data: sessionData } = await supabase.auth.signInWithPassword({
+    email: invite.email,
+    password: password,
+  });
 
   return res.status(201).json({
-    token: authToken,
+    token: sessionData.session?.access_token,
     user: {
       id: userId,
       name: name.trim(),
       email: invite.email,
       role: 'admin',
-      shopId,
+      shopId: shop.id,
     },
     shop: {
-      id: shopId,
+      id: shop.id,
       name: shopName.trim(),
       address: shopAddress?.trim() || null,
       phone: shopPhone?.trim() || null,
@@ -264,16 +310,15 @@ router.post('/:token/accept', async (req, res) => {
 router.post('/:id/resend', requireAuth, requireRole('super_admin'), async (req, res) => {
   const { id } = req.params;
 
-  const result = await db.execute({
-    sql: "SELECT id, email, status, expires_at FROM invites WHERE id = ?",
-    args: [id],
-  });
+  const { data: invite } = await supabase
+    .from('invites')
+    .select('id, email, status, expires_at')
+    .eq('id', id)
+    .single();
 
-  if (result.rows.length === 0) {
+  if (!invite) {
     return res.status(404).json({ error: 'Invite not found' });
   }
-
-  const invite = result.rows[0];
 
   if (invite.status === 'accepted') {
     return res.status(400).json({ error: 'Cannot resend an accepted invite' });
@@ -282,18 +327,20 @@ router.post('/:id/resend', requireAuth, requireRole('super_admin'), async (req, 
   const newToken = generateToken();
   const newExpiresAt = getExpiresAt();
 
-  await db.execute({
-    sql: "UPDATE invites SET token = ?, expires_at = ?, status = 'pending' WHERE id = ?",
-    args: [newToken, newExpiresAt, id],
-  });
+  await supabase
+    .from('invites')
+    .update({ token: newToken, expires_at: newExpiresAt, status: 'pending' })
+    .eq('id', id);
 
-  const inviterRow = await db.execute({
-    sql: 'SELECT name FROM users WHERE id = ?',
-    args: [req.auth!.userId],
-  });
-  const inviterName = inviterRow.rows[0]?.name as string || 'zLean Admin';
+  const { data: inviter } = await supabase
+    .from('profiles')
+    .select('name')
+    .eq('id', req.auth!.userId)
+    .single();
 
-  const emailSent = await sendInviteEmail({ to: invite.email as string, token: newToken, inviterName });
+  const inviterName = inviter?.name || 'zLean Admin';
+
+  const emailSent = await sendInviteEmail({ to: invite.email, token: newToken, inviterName });
 
   return res.json({
     id,
@@ -308,25 +355,24 @@ router.post('/:id/resend', requireAuth, requireRole('super_admin'), async (req, 
 router.delete('/:id', requireAuth, requireRole('super_admin'), async (req, res) => {
   const { id } = req.params;
 
-  const result = await db.execute({
-    sql: "SELECT id, status FROM invites WHERE id = ?",
-    args: [id],
-  });
+  const { data: invite } = await supabase
+    .from('invites')
+    .select('id, status')
+    .eq('id', id)
+    .single();
 
-  if (result.rows.length === 0) {
+  if (!invite) {
     return res.status(404).json({ error: 'Invite not found' });
   }
-
-  const invite = result.rows[0];
 
   if (invite.status === 'accepted') {
     return res.status(400).json({ error: 'Cannot revoke an accepted invite' });
   }
 
-  await db.execute({
-    sql: "UPDATE invites SET status = 'revoked' WHERE id = ?",
-    args: [id],
-  });
+  await supabase
+    .from('invites')
+    .update({ status: 'revoked' })
+    .eq('id', id);
 
   return res.json({ success: true });
 });

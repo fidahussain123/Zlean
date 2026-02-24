@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { db } from '../db/turso.js';
+import { supabase } from '../db/supabase.js';
 import { attachAuth, requireAuth } from '../middleware/auth.js';
 import { requireAdminOrSuper, requireWorker } from '../middleware/roleGuard.js';
 
@@ -8,57 +8,84 @@ const router = Router();
 router.use(attachAuth);
 router.use(requireAuth);
 
-/** Admin: today's stats + today's visits with customer/worker names */
 router.get('/admin', requireAdminOrSuper, async (req, res) => {
-  const shopId = req.auth!.role === 'super_admin' ? req.query.shop_id : req.auth!.shopId;
+  const shopId = req.auth!.role === 'super_admin' ? req.query.shop_id as string : req.auth!.shopId;
+  
   if (!shopId) {
     return res.json({ totalToday: 0, inProgress: 0, ready: 0, revenueToday: 0, visits: [] });
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  const visitsRes = await db.execute({
-    sql: `SELECT v.*, 
-          c.name as customer_name, c.phone as customer_phone,
-          w.name as worker_name
-          FROM visits v
-          LEFT JOIN users c ON v.customer_id = c.id
-          LEFT JOIN users w ON v.worker_id = w.id
-          WHERE v.shop_id = ? AND date(v.created_at) = ?
-          ORDER BY v.created_at DESC`,
-    args: [shopId, today],
-  });
-  const visits = visitsRes.rows as Array<Record<string, unknown>>;
+  
+  const { data: visits, error: visitsError } = await supabase
+    .from('visits')
+    .select(`
+      *,
+      customer:profiles!visits_customer_id_fkey(name, phone),
+      worker:profiles!visits_worker_id_fkey(name)
+    `)
+    .eq('shop_id', shopId)
+    .gte('created_at', `${today}T00:00:00`)
+    .lt('created_at', `${today}T23:59:59`)
+    .order('created_at', { ascending: false });
 
-  const totalToday = visits.length;
-  const inProgress = visits.filter((v) => ['waiting', 'washing', 'drying'].includes((v.status as string) ?? '')).length;
-  const ready = visits.filter((v) => (v.status as string) === 'ready').length;
+  if (visitsError) {
+    return res.status(500).json({ error: visitsError.message });
+  }
 
-  const revRes = await db.execute({
-    sql: `SELECT COALESCE(SUM(i.amount), 0) as total FROM invoices i
-          JOIN visits v ON i.visit_id = v.id
-          WHERE v.shop_id = ? AND i.status = 'paid' AND date(i.paid_at) = ?`,
-    args: [shopId, today],
-  });
-  const revenueToday = Number((revRes.rows[0] as { total?: number })?.total ?? 0);
+  const mappedVisits = (visits || []).map(v => ({
+    ...v,
+    customer_name: (v.customer as { name?: string } | null)?.name || null,
+    customer_phone: (v.customer as { phone?: string } | null)?.phone || null,
+    worker_name: (v.worker as { name?: string } | null)?.name || null,
+  }));
 
-  res.json({ totalToday, inProgress, ready, revenueToday, visits });
+  const totalToday = mappedVisits.length;
+  const inProgress = mappedVisits.filter(v => ['waiting', 'washing', 'drying'].includes(v.status || '')).length;
+  const ready = mappedVisits.filter(v => v.status === 'ready').length;
+
+  const { data: revenueData } = await supabase
+    .from('invoices')
+    .select('amount, visits!inner(shop_id)')
+    .eq('status', 'paid')
+    .eq('visits.shop_id', shopId)
+    .gte('paid_at', `${today}T00:00:00`)
+    .lt('paid_at', `${today}T23:59:59`);
+
+  const revenueToday = (revenueData || []).reduce((sum, inv) => sum + Number(inv.amount || 0), 0);
+
+  res.json({ totalToday, inProgress, ready, revenueToday, visits: mappedVisits });
 });
 
-/** Worker: my queue today stats */
 router.get('/worker', requireWorker, async (req, res) => {
   const workerId = req.auth!.userId;
   const today = new Date().toISOString().slice(0, 10);
-  const visitsRes = await db.execute({
-    sql: `SELECT v.*, c.name as customer_name, c.phone as customer_phone
-          FROM visits v LEFT JOIN users c ON v.customer_id = c.id
-          WHERE v.worker_id = ? AND date(v.created_at) = ?
-          ORDER BY v.created_at ASC`,
-    args: [workerId, today],
-  });
-  const visits = visitsRes.rows as Array<Record<string, unknown>>;
-  const completed = visits.filter((v) => (v.status as string) === 'delivered').length;
-  const inProgress = visits.filter((v) => ['waiting', 'washing', 'drying', 'ready'].includes((v.status as string) ?? '')).length;
-  res.json({ assignedToday: visits.length, completed, inProgress, visits });
+  
+  const { data: visits, error } = await supabase
+    .from('visits')
+    .select(`
+      *,
+      customer:profiles!visits_customer_id_fkey(name, phone)
+    `)
+    .eq('worker_id', workerId)
+    .gte('created_at', `${today}T00:00:00`)
+    .lt('created_at', `${today}T23:59:59`)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const mappedVisits = (visits || []).map(v => ({
+    ...v,
+    customer_name: (v.customer as { name?: string } | null)?.name || null,
+    customer_phone: (v.customer as { phone?: string } | null)?.phone || null,
+  }));
+
+  const completed = mappedVisits.filter(v => v.status === 'delivered').length;
+  const inProgress = mappedVisits.filter(v => ['waiting', 'washing', 'drying', 'ready'].includes(v.status || '')).length;
+  
+  res.json({ assignedToday: mappedVisits.length, completed, inProgress, visits: mappedVisits });
 });
 
 export default router;

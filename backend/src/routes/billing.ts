@@ -1,8 +1,7 @@
 import { Router } from 'express';
-import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/turso.js';
+import { supabase } from '../db/supabase.js';
 import { attachAuth, requireAuth } from '../middleware/auth.js';
-import { requireAdminOrSuper, requireWorker } from '../middleware/roleGuard.js';
+import { requireAdminOrSuper } from '../middleware/roleGuard.js';
 
 const router = Router();
 
@@ -11,64 +10,116 @@ router.use(requireAuth);
 
 router.get('/invoices', async (req, res) => {
   const visitId = req.query.visit_id as string | undefined;
+  
   if (visitId) {
-    const r = await db.execute({ sql: 'SELECT * FROM invoices WHERE visit_id = ?', args: [visitId] });
-    return res.json(r.rows);
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('*')
+      .eq('visit_id', visitId);
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
   }
+  
   if (req.auth!.role === 'super_admin') {
-    const r = await db.execute({ sql: 'SELECT * FROM invoices ORDER BY created_at DESC', args: [] });
-    return res.json(r.rows);
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
   }
+  
   if (req.auth!.role === 'admin' && req.auth!.shopId) {
-    const r = await db.execute({
-      sql: 'SELECT i.* FROM invoices i JOIN visits v ON i.visit_id = v.id WHERE v.shop_id = ? ORDER BY i.created_at DESC',
-      args: [req.auth.shopId],
-    });
-    return res.json(r.rows);
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('*, visits!inner(shop_id)')
+      .eq('visits.shop_id', req.auth!.shopId)
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
   }
+  
   if (req.auth!.role === 'customer') {
-    const r = await db.execute({
-      sql: 'SELECT i.* FROM invoices i JOIN visits v ON i.visit_id = v.id WHERE v.customer_id = ? ORDER BY i.created_at DESC',
-      args: [req.auth.userId],
-    });
-    return res.json(r.rows);
+    const { data, error } = await supabase
+      .from('invoices')
+      .select('*, visits!inner(customer_id)')
+      .eq('visits.customer_id', req.auth!.userId)
+      .order('created_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
   }
+  
   return res.json([]);
 });
 
 router.post('/invoices', requireAdminOrSuper, async (req, res) => {
   const { visit_id, amount, payment_method } = req.body || {};
-  if (!visit_id || amount == null) return res.status(400).json({ error: 'visit_id and amount required' });
-  const v = await db.execute({ sql: 'SELECT shop_id FROM visits WHERE id = ?', args: [visit_id] });
-  if (v.rows.length === 0) return res.status(404).json({ error: 'Visit not found' });
-  if (req.auth!.role === 'admin' && (v.rows[0].shop_id as string) !== req.auth!.shopId) {
+  if (!visit_id || amount == null) {
+    return res.status(400).json({ error: 'visit_id and amount required' });
+  }
+  
+  const { data: visit, error: visitError } = await supabase
+    .from('visits')
+    .select('shop_id')
+    .eq('id', visit_id)
+    .single();
+  
+  if (visitError || !visit) {
+    return res.status(404).json({ error: 'Visit not found' });
+  }
+  
+  if (req.auth!.role === 'admin' && visit.shop_id !== req.auth!.shopId) {
     return res.status(403).json({ error: 'Forbidden' });
   }
-  const id = uuidv4();
-  await db.execute({
-    sql: 'INSERT INTO invoices (id, visit_id, amount, payment_method, status) VALUES (?, ?, ?, ?, ?)',
-    args: [id, visit_id, amount, payment_method || 'cash', 'pending'],
-  });
-  const r = await db.execute({ sql: 'SELECT * FROM invoices WHERE id = ?', args: [id] });
-  res.status(201).json(r.rows[0]);
+  
+  const { data, error } = await supabase
+    .from('invoices')
+    .insert({
+      visit_id,
+      amount,
+      payment_method: payment_method || 'cash',
+      status: 'pending',
+    })
+    .select()
+    .single();
+  
+  if (error) return res.status(500).json({ error: error.message });
+  res.status(201).json(data);
 });
 
 router.patch('/invoices/:id', requireAdminOrSuper, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body || {};
-  const r = await db.execute({
-    sql: 'SELECT i.id FROM invoices i JOIN visits v ON i.visit_id = v.id WHERE i.id = ?',
-    args: [id],
-  });
-  if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-  if (status === 'paid') {
-    await db.execute({
-      sql: "UPDATE invoices SET status = ?, paid_at = datetime('now') WHERE id = ?",
-      args: ['paid', id],
-    });
+  
+  const { data: invoice, error: fetchError } = await supabase
+    .from('invoices')
+    .select('id')
+    .eq('id', id)
+    .single();
+  
+  if (fetchError || !invoice) {
+    return res.status(404).json({ error: 'Not found' });
   }
-  const out = await db.execute({ sql: 'SELECT * FROM invoices WHERE id = ?', args: [id] });
-  res.json(out.rows[0]);
+  
+  if (status === 'paid') {
+    const { data, error } = await supabase
+      .from('invoices')
+      .update({ status: 'paid', paid_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+    
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data);
+  }
+  
+  const { data } = await supabase
+    .from('invoices')
+    .select('*')
+    .eq('id', id)
+    .single();
+  
+  res.json(data);
 });
 
 export default router;
