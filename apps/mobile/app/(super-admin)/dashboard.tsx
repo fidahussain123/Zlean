@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
-import { api } from '@/services/api';
+import { supabase } from '@/lib/supabase';
 import { colors, spacing, radius, typography, shadow } from '@/constants/theme';
 
 interface Counts {
@@ -18,13 +18,17 @@ export default function SuperAdminDashboard() {
   useEffect(() => {
     (async () => {
       try {
-        const [shops, admins] = await Promise.all([
-          api<unknown[]>('/shops'),
-          api<unknown[]>('/admins').catch(() => []),
+        const [
+          { count: shopsCount },
+          { count: adminsCount }
+        ] = await Promise.all([
+          supabase.from('shops').select('id', { count: 'exact', head: true }),
+          supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('role', 'admin')
         ]);
+
         setCounts({
-          shops: Array.isArray(shops) ? shops.length : 0,
-          admins: Array.isArray(admins) ? admins.length : 0,
+          shops: shopsCount || 0,
+          admins: adminsCount || 0,
           visits: 0,
         });
       } catch {

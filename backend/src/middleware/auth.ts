@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { db } from '../db/turso.js';
+import { supabase } from '../db/supabase.js';
 import type { AuthContext } from './roleGuard.js';
 
 const SUPER_ADMIN_EMAIL = 'zlean314@gmail.com';
@@ -12,21 +12,24 @@ export async function attachAuth(req: Request, res: Response, next: NextFunction
   }
   const token = authHeader.slice(7);
   try {
-    const payload = JSON.parse(Buffer.from(token, 'base64url').toString());
-    if (payload.userId && payload.role) {
-      const row = await db.execute({
-        sql: 'SELECT id, role, shop_id, email FROM users WHERE id = ? AND status = ?',
-        args: [payload.userId, 'active'],
-      });
-      if (row.rows.length) {
-        const u = row.rows[0];
-        req.auth = {
-          userId: u.id as string,
-          role: u.role as AuthContext['role'],
-          shopId: u.shop_id as string | undefined,
-          email: u.email as string | undefined,
-        };
-      }
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) {
+      return next();
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('id, role, shop_id, email')
+      .eq('id', user.id)
+      .single();
+
+    if (profile) {
+      req.auth = {
+        userId: profile.id,
+        role: profile.role as AuthContext['role'],
+        shopId: profile.shop_id || undefined,
+        email: profile.email || undefined,
+      };
     }
   } catch {
     // ignore invalid token

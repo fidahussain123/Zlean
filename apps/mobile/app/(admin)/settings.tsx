@@ -1,16 +1,14 @@
 import { View, Text, Pressable, StyleSheet, Alert, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
-import { clearSession } from '@/services/api';
+import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/auth';
 import { colors, spacing, radius, shadow } from '@/constants/theme';
 
 export default function AdminSettingsScreen() {
   const router = useRouter();
-  const { setUser } = useAuth();
 
   async function doLogout() {
-    await clearSession();
-    setUser(null);
+    await supabase.auth.signOut();
     router.replace('/(auth)/login');
   }
 

@@ -1,9 +1,16 @@
-import { Stack, useRouter } from 'expo-router';
+import { Stack, useRouter, Redirect } from 'expo-router';
 import { Pressable, Text } from 'react-native';
 import { colors } from '@/constants/theme';
+import { useAuth } from '@/contexts/auth';
 
 export default function AdminLayout() {
   const router = useRouter();
+  const { user, ready } = useAuth();
+
+  if (ready && (!user || user.role !== 'admin')) {
+    return <Redirect href="/" />;
+  }
+
   return (
     <Stack
       screenOptions={{

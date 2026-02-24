@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import type { Role } from '../db/turso.js';
+import type { Role } from '../db/supabase.js';
 
 export interface AuthContext {
   userId: string;
